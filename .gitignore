@@ -1,0 +1,25 @@
+# Configurações locais e credenciais
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Arquivos temporários
+*.log
+*.tmp
+
+# Dados gerados durante testes
+testes/pedidos_falha.json
+
+# Imagens geradas dos ingressos
+saidas/seq/
+saidas/par/
+
+# Resultados experimentais
+# Manter os arquivos JSON e CSV dos benchmarks no GitHub
