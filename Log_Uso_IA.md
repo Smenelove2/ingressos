@@ -5,7 +5,7 @@
 
 Este relatório documenta o uso do ChatGPT como ferramenta de apoio técnico durante a **execução dos testes, a identificação de erros e a correção de falhas** no projeto de Sistema Distribuído de Venda de Ingressos.
 
-A atuação da inteligência artificial concentrou-se na interpretação das mensagens de erro, na sugestão de ajustes de código, na orientação dos procedimentos de teste e na análise dos resultados obtidos.
+A atuação da inteligência artificial concentrou-se na interpretação das mensagens de erro, na sugestão de ajustes de código, na orientação dos procedimentos de teste e na análise dos resultados obtidos. Este documento **não abrange a criação inicial da arquitetura nem a implementação original do sistema**.
 
 ### 2. Identificação e correção de falhas
 
@@ -195,4 +195,10 @@ As alterações sugeridas foram aplicadas e verificadas por meio de comandos exe
 **Alterações realizadas nesta etapa:** atualização de documentação (`README.md` e deste `log_uso_ia.md`). **Nenhum arquivo `.py`, SQL ou `docker-compose.yml` foi modificado nesta revisão**, e não foram inventados novos resultados de teste.
 
 **Resultado:** README compatível com o código e com as evidências presentes no arquivo enviado, disponibilizado em Markdown para substituição no repositório.
-  
+
+
+## Refatoração conservadora dos serviços (27/11/2026)
+
+A IA auxiliou na reorganização do código fornecido, sem modificar deliberadamente os contratos HTTP ou as filas. Foram extraídas funções auxiliares para validar pedidos com bloqueio transacional, atualizar o estoque e publicar lotes da outbox. O worker teve o tratamento de `ack`/`nack` consolidado e imports não usados removidos. O objetivo foi reduzir duplicações e melhorar a legibilidade, preservando o processamento assíncrono, os controles de concorrência e a idempotência.
+
+A refatoração foi submetida a verificações estáticas e testes locais disponíveis. Os testes distribuídos com Docker, RabbitMQ e PostgreSQL devem ser repetidos no ambiente do projeto antes do merge.

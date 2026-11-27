@@ -2,13 +2,10 @@
 import json
 import logging
 import threading
-import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
-from typing import Literal
 
-from fastapi import FastAPI, Header, HTTPException, Response
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 from psycopg.types.json import Jsonb
 
@@ -20,6 +17,23 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s api %(
 log = logging.getLogger('api')
 stop = threading.Event()
 
+
+
+def publicar_pedidos(db, channel):
+    """Publica lotes da outbox e marca cada confirmação no banco."""
+    rows = db.execute(
+        """SELECT id, pedido_id FROM outbox WHERE publicado_em IS NULL
+           ORDER BY id LIMIT 30 FOR UPDATE SKIP LOCKED"""
+    ).fetchall()
+    for row in rows:
+        channel.basic_publish(
+            exchange='', routing_key=QUEUE,
+            body=json.dumps({'pedido_id': str(row['pedido_id'])}).encode(),
+            properties=pika.BasicProperties(delivery_mode=2, content_type='application/json'),
+            mandatory=True,
+        )
+        db.execute('UPDATE outbox SET publicado_em=NOW() WHERE id=%s', (row['id'],))
+    return bool(rows)
 
 
 def dispatch():
@@ -36,42 +50,8 @@ def dispatch():
             while not stop.is_set():
                 with connection() as db:
                     with db.transaction():
-                        rows = db.execute(
-                            """
-                            SELECT o.id, o.pedido_id
-                            FROM outbox o
-                            WHERE o.publicado_em IS NULL
-                            ORDER BY o.id
-                            LIMIT 30
-                            FOR UPDATE SKIP LOCKED
-                            """
-                        ).fetchall()
-
-                        for row in rows:
-                            body = json.dumps({
-                                'pedido_id': str(row['pedido_id'])
-                            }).encode()
-                            channel.basic_publish(
-                                exchange='',
-                                routing_key=QUEUE,
-                                body=body,
-                                properties=pika.BasicProperties(
-                                    delivery_mode=2,
-                                    content_type='application/json'
-                                ),
-                                mandatory=True
-                            )
-                            db.execute(
-                                """
-                                UPDATE outbox
-                                SET publicado_em = NOW()
-                                WHERE id = %s
-                                """,
-                                (row['id'],)
-                            )
-
-                # Evita consultas contínuas quando não há mensagens.
-                if not rows:
+                        publicou = publicar_pedidos(db, channel)
+                if not publicou:
                     stop.wait(0.2)
 
         except Exception:

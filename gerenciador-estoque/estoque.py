@@ -3,6 +3,7 @@ import os
 import uuid
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Header, Depends
 from pydantic import BaseModel, Field
@@ -28,6 +29,26 @@ class Finalizar(BaseModel):
     aprovado: bool
 
 
+def pedido_validado(db, pedido_id, tipo):
+    """Obtém e bloqueia o pedido para operações idempotentes."""
+    pedido = db.execute(
+        'SELECT * FROM pedidos WHERE id=%s FOR UPDATE', (pedido_id,)
+    ).fetchone()
+    if not pedido or pedido['tipo'] != tipo:
+        raise HTTPException(404, 'Comando inválido')
+    return pedido
+
+
+def mover_estoque(db, reserva, destino):
+    """Transfere unidades reservadas para vendido ou disponível."""
+    if destino not in ('vendido', 'disponivel'):
+        raise ValueError('Destino de estoque inválido')
+    db.execute(
+        f'UPDATE estoque SET reservado=reservado-%s, {destino}={destino}+%s WHERE setor=%s',
+        (reserva['quantidade'], reserva['quantidade'], reserva['setor'])
+    )
+
+
 def result(db, pedido_id, data):
     db.execute('UPDATE pedidos SET status=%s, resultado=%s, atualizado_em=now() WHERE id=%s',
         ('concluido', Jsonb(data), pedido_id))
@@ -37,9 +58,7 @@ def result(db, pedido_id, data):
 def reservar(body: PedidoID):
     with connection() as db:
         with db.transaction():
-            order = db.execute('SELECT * FROM pedidos WHERE id=%s FOR UPDATE', (body.pedido_id,)).fetchone()
-            if not order or order['tipo'] != 'reservar':
-                raise HTTPException(404, 'Comando inválido')
+            order = pedido_validado(db, body.pedido_id, 'reservar')
             if order['status'] == 'concluido':
                 return order['resultado']
             p = order['payload']
@@ -60,9 +79,7 @@ def reservar(body: PedidoID):
 def preparar(body: PedidoID):
     with connection() as db:
         with db.transaction():
-            order = db.execute('SELECT * FROM pedidos WHERE id=%s FOR UPDATE', (body.pedido_id,)).fetchone()
-            if not order or order['tipo'] != 'confirmar':
-                raise HTTPException(404, 'Comando inválido')
+            order = pedido_validado(db, body.pedido_id, 'confirmar')
             if order['status'] == 'concluido':
                 return {'terminal': True, **order['resultado']}
             rid = order['payload']['reserva_id']
@@ -75,8 +92,7 @@ def preparar(body: PedidoID):
                 return {'terminal': True, **result(db,body.pedido_id,{'estado':reserva['estado'],'confirmado':False})}
             if reserva['estado'] == 'em_reserva' and reserva['expira_em'] <= datetime.now(timezone.utc):
                 db.execute('UPDATE reservas SET estado=%s WHERE id=%s',('expirada',rid))
-                db.execute('UPDATE estoque SET reservado=reservado-%s, disponivel=disponivel+%s WHERE setor=%s',
-                    (reserva['quantidade'],reserva['quantidade'],reserva['setor']))
+                mover_estoque(db, reserva, 'disponivel')
                 return {'terminal':True, **result(db,body.pedido_id,{'estado':'expirada','confirmado':False})}
             # Apenas um pedido de confirmação controla essa reserva.
             # Outra confirmação concorrente não pode finalizar o pagamento por ela.
@@ -94,9 +110,7 @@ def preparar(body: PedidoID):
 def finalizar(body: Finalizar):
     with connection() as db:
         with db.transaction():
-            order = db.execute('SELECT * FROM pedidos WHERE id=%s FOR UPDATE',(body.pedido_id,)).fetchone()
-            if not order or order['tipo']!='confirmar':
-                raise HTTPException(404, 'Comando inválido')
+            order = pedido_validado(db, body.pedido_id, 'confirmar')
             if order['status']=='concluido':
                 return order['resultado']
             if not order['resultado'] or not order['resultado'].get('preparado'):
@@ -105,14 +119,8 @@ def finalizar(body: Finalizar):
             reserva = db.execute('SELECT * FROM reservas WHERE id=%s FOR UPDATE',(rid,)).fetchone()
             if not reserva or reserva['estado']!='confirmando':
                 raise HTTPException(409,'Reserva não está confirmando')
-            if body.aprovado:
-                db.execute('UPDATE estoque SET reservado=reservado-%s,vendido=vendido+%s WHERE setor=%s',
-                    (reserva['quantidade'],reserva['quantidade'],reserva['setor']))
-                state = 'vendido'
-            else:
-                db.execute('UPDATE estoque SET reservado=reservado-%s,disponivel=disponivel+%s WHERE setor=%s',
-                    (reserva['quantidade'],reserva['quantidade'],reserva['setor']))
-                state = 'recusada'
+            state = 'vendido' if body.aprovado else 'recusada'
+            mover_estoque(db, reserva, 'vendido' if body.aprovado else 'disponivel')
             db.execute('UPDATE reservas SET estado=%s WHERE id=%s',(state,rid))
             log.info('confirmação pedido=%s reserva=%s estado=%s',body.pedido_id,rid,state)
             return result(db,body.pedido_id,{'estado':state,'confirmado':body.aprovado,'reserva_id':str(rid)})
@@ -130,12 +138,10 @@ def expire_once():
                  AND expira_em < now() FOR UPDATE SKIP LOCKED LIMIT 100''').fetchall()
             for row in rows:
                 db.execute('UPDATE reservas SET estado=%s WHERE id=%s',('expirada',row['id']))
-                db.execute('UPDATE estoque SET reservado=reservado-%s,disponivel=disponivel+%s WHERE setor=%s',
-                    (row['quantidade'],row['quantidade'],row['setor']))
+                mover_estoque(db, row, 'disponivel')
                 log.info('reserva expirada reserva=%s',row['id'])
 
 def reaper():
-    import time
     while True:
         try: expire_once()
         except Exception: log.exception('Falha no reaper')
